@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-doxatlas_collector}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-doxatlas_collector}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-doxatlas_collector}
+      DATA_API_HOST: 0.0.0.0
+      DATA_API_PORT: ${DATA_API_PORT:-8028}
+      DATA_API_ALLOWED_CLIENT_IPS: ${DATA_API_ALLOWED_CLIENT_IPS:-43.135.22.202}
+      DATA_API_TRUST_PROXY_HEADERS: ${DATA_API_TRUST_PROXY_HEADERS:-false}
+      DATA_API_INIT_DB_ON_STARTUP: ${DATA_API_INIT_DB_ON_STARTUP:-true}
+      GUBA_PROXY_MODE: ${GUBA_PROXY_MODE:-direct}
+      GUBA_PROXY_API_URL: ${GUBA_PROXY_API_URL:-}
+      GUBA_PROXY_TTL_SECONDS: ${GUBA_PROXY_TTL_SECONDS:-180}
+      GUBA_PROXY_MAX_PER_TASK: ${GUBA_PROXY_MAX_PER_TASK:-3}
+      GUBA_DETAIL_DIRECT_LIMIT: ${GUBA_DETAIL_DIRECT_LIMIT:-500}
+    ports:
+      - "${DATA_API_PORT:-8028}:8028"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  collector:
+    build: .
+    profiles: ["manual"]
+    entrypoint: ["cn-hk-collector"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-doxatlas_collector}
+      GUBA_PROXY_MODE: ${GUBA_PROXY_MODE:-direct}
+      GUBA_PROXY_API_URL: ${GUBA_PROXY_API_URL:-}
+      GUBA_PROXY_TTL_SECONDS: ${GUBA_PROXY_TTL_SECONDS:-180}
+      GUBA_PROXY_MAX_PER_TASK: ${GUBA_PROXY_MAX_PER_TASK:-3}
+      GUBA_DETAIL_DIRECT_LIMIT: ${GUBA_DETAIL_DIRECT_LIMIT:-500}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["--help"]
+
+volumes:
+  postgres_data:

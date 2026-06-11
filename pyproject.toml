@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doxatlas-data-api"
+version = "0.1.0"
+description = "DoxAtlas mainland CN/HK crawler API with local Postgres persistence."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "akshare>=1.16.0",
+    "beautifulsoup4>=4.12.0",
+    "fastapi>=0.104.0",
+    "lxml>=4.9.0",
+    "psycopg[binary]>=3.2.0",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+    "uvicorn>=0.24.0",
+]
+
+[project.scripts]
+doxatlas-data-api = "doxatlas_data_api.main:main"
+cn-hk-collector = "cn_hk_collector.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cn_hk_collector = ["schema.sql"]
