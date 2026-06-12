@@ -78,5 +78,11 @@ The API initializes schema on startup when `DATA_API_INIT_DB_ON_STARTUP=true`.
 - Preserve long-content filtering:
   - media content over 5000 chars is marked irrelevant,
   - social content over 250 chars is marked irrelevant.
+- Preserve EastMoney Guba proxy scheduling in production proxy mode:
+  - `GUBA_PROXY_MODE=api_pool` must use the original SmartBatch scheduler,
+  - SmartBatch shape is 8 URL pools x 8 worker threads per pool,
+  - each pool keeps 4 proxy slots and a 15-IP budget,
+  - `GUBA_PROXY_MAX_PER_TASK` applies to the single `ProxyManager` list/direct path, not to SmartBatch's per-pool detail budget,
+  - `direct`/`off` modes are allowed only to keep local standalone runs working without a proxy API.
 - The pull endpoint must remain one-time. This prevents accidental duplicate ingestion by the Hong Kong backend.
 - Main-service US data collection must not be routed through this API.

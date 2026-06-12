@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 from .guba_utils.Parser import parse_detail_html
 from .guba_utils.ProxyManager import ProxyManager
+from .guba_utils.SmartBatchCrawler import GlobalScheduler
 from cn_hk_collector.collectors.chinese_text import clean_chinese_text, decode_chinese_response
 from cn_hk_collector.collectors.crawl_log import format_social_crawl_summary
 from cn_hk_collector.content_filters import apply_length_relevance_filter
@@ -44,6 +45,7 @@ DETAIL_DIRECT_DEADLINE_SECONDS = 60
 DETAIL_DIRECT_WORKERS = 32
 DETAIL_DIRECT_LIMIT = int(os.environ.get("GUBA_DETAIL_DIRECT_LIMIT", "500"))
 MAX_LIST_PAGES = 100
+DIRECT_PROXY_MODES = {"direct", "none", "off"}
 
 
 def _extract_guba_ticker_from_url(url: str) -> str | None:
@@ -429,7 +431,7 @@ def _fetch_guba_detail_proxy_worker(url: str, proxy_manager: ProxyManager) -> di
     return detail or {}
 
 
-def _fetch_guba_details_proxy(urls: list[str]) -> dict:
+def _fetch_guba_details_direct_pool(urls: list[str], candidate_count: int | None = None) -> dict:
     selected_urls = urls[:DETAIL_DIRECT_LIMIT]
     results: dict[str, dict] = {}
     if not selected_urls:
@@ -461,9 +463,29 @@ def _fetch_guba_details_proxy(urls: list[str]) -> dict:
         "duration_seconds": round(time.perf_counter() - started, 2),
         "total_ips_used": int(getattr(proxy_manager, "ips_fetched", 0) or 0),
         "timed_out": timed_out,
-        "detail_capped": len(selected_urls) < len(urls),
-        "candidate_urls": len(urls),
+        "detail_capped": len(selected_urls) < (candidate_count or len(urls)),
+        "candidate_urls": candidate_count or len(urls),
     }
+
+
+def _fetch_guba_details_proxy(urls: list[str]) -> dict:
+    selected_urls = urls[:DETAIL_DIRECT_LIMIT]
+    if not selected_urls:
+        return {"data": {}, "total_urls": 0, "success_count": 0, "missing_count": 0, "duration_seconds": 0.0, "total_ips_used": 0, "timed_out": False}
+
+    proxy_mode = os.environ.get("GUBA_PROXY_MODE", "direct").strip().lower()
+    if proxy_mode in DIRECT_PROXY_MODES:
+        return _fetch_guba_details_direct_pool(selected_urls, candidate_count=len(urls))
+
+    scheduler = GlobalScheduler(
+        selected_urls,
+        max_attempts_per_url=DETAIL_MAX_ATTEMPTS_PER_URL,
+        deadline_seconds=DETAIL_DEADLINE_SECONDS,
+    )
+    report = scheduler.run()
+    report["detail_capped"] = len(selected_urls) < len(urls)
+    report["candidate_urls"] = len(urls)
+    return report
 
 
 def _fetch_guba_detail_direct(url: str, proxies: dict | None = None) -> dict:
@@ -471,7 +493,7 @@ def _fetch_guba_detail_direct(url: str, proxies: dict | None = None) -> dict:
 
 
 def _fetch_guba_details_direct(urls: list[str]) -> dict:
-    return _fetch_guba_details_proxy(urls)
+    return _fetch_guba_details_direct_pool(urls)
 
 
 def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None, window_end=None, market: str = "cn") -> list:

@@ -80,6 +80,8 @@ $env:GUBA_PROXY_API_URL="https://your-proxy-provider.example/api"
 $env:GUBA_PROXY_MAX_PER_TASK="3"
 ```
 
+When `GUBA_PROXY_MODE=api_pool`, Guba detail fetching uses the original SmartBatch scheduler: 8 URL pools, 8 worker threads per pool, 4 proxy slots per pool, and 15 proxy IPs per pool. `GUBA_PROXY_TTL_SECONDS=180` is still used by the Smart proxy manager. `GUBA_PROXY_MAX_PER_TASK=3` belongs to the single-`ProxyManager` list/direct path and does not replace the SmartBatch 15-IP-per-pool detail budget. The `direct`/`off` modes intentionally keep the standalone project runnable without a proxy API and use the lighter direct detail worker path.
+
 ## Docker
 
 ```powershell
