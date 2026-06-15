@@ -1,0 +1,10 @@
+2026-06-15
+- Added Qingguo-compatible proxy API parsing for JSON `data[].server` responses while preserving legacy text `ip:port` support.
+- Exposed proxy extraction throttling and Qingguo proxy authentication environment variables for local and Docker runs.
+- Prevented blocked EastMoney Guba list HTML from being parsed after anti-bot detection.
+- Switched Guba list pagination to the mobile WebArticleList API before falling back to desktop HTML parsing.
+- Corrected Guba detail failure metrics so capped-but-unselected URLs are not counted as detail failures.
+- Corrected CN/HK media detail failure metrics to avoid double-counting missing detail responses.
+- Added final body-text success metrics and used Guba list `post_content` as social content fallback.
+- Raised the Yicai media detail cap to improve final media body coverage.
+- Made Guba list pagination stop only when a whole page is older than the requested window.

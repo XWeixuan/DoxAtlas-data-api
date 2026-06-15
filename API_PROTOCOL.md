@@ -4,7 +4,7 @@ This API runs on the mainland crawler server and exposes CN/HK crawler data to t
 
 ## Network Contract
 
-- Base URL: `http://<MAINLAND_PUBLIC_IP>:8028`
+- Base URL: `http://43.135.22.202:8028`
 - Fixed port: `8028`
 - Allowed client IP by default: `43.135.22.202`
 - Default allowlist environment variable: `DATA_API_ALLOWED_CLIENT_IPS=43.135.22.202`
@@ -159,7 +159,7 @@ Errors:
 The DoxAtlas backend uses the remote API only when `CN_HK_DATA_API_BASE_URL` is set.
 
 ```text
-CN_HK_DATA_API_BASE_URL=http://<MAINLAND_PUBLIC_IP>:8028
+CN_HK_DATA_API_BASE_URL=http://43.135.22.202:8028
 CN_HK_DATA_API_TIMEOUT_SECONDS=30
 CN_HK_DATA_API_MAX_WAIT_SECONDS=420
 CN_HK_DATA_API_POLL_INTERVAL_SECONDS=3

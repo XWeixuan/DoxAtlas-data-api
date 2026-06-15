@@ -9,6 +9,7 @@ import requests
 from cn_hk_collector.collectors.chinese_text import decode_chinese_response
 from .Parser import parse_detail_html
 from .SmartProxyManager import ProxyNode, SmartProxyManager
+from .proxy_provider import format_requests_proxies
 
 ParserFunc = Callable[[str], dict]
 
@@ -83,7 +84,7 @@ class WorkerThread(threading.Thread):
         elif not url.startswith("http"):
             actual_url = "http://guba.eastmoney.com" + url
 
-        proxies = {"http": f"http://{node.ip}", "https": f"http://{node.ip}"} if node.ip else {}
+        proxies = format_requests_proxies(node.ip) if node.ip else {}
         try:
             resp = requests.get(actual_url, headers=self.header, timeout=10, proxies=proxies)
             if resp.status_code in [403, 429]:

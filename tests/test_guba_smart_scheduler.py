@@ -66,6 +66,28 @@ class GubaSmartSchedulerTest(unittest.TestCase):
         scheduler.assert_not_called()
         self.assertIs(report, expected)
 
+    def test_parse_mguba_api_list_items_uses_content_when_title_is_empty(self) -> None:
+        payload = {
+            "rc": 1,
+            "re": [
+                {
+                    "post_id": 1726810225,
+                    "post_title": "",
+                    "post_content": "<p>贵州茅台今日成交活跃，投资者继续讨论分红。</p>",
+                    "post_publish_time": "2026-06-15 21:01:11",
+                    "post_user": {"user_nickname": "tester"},
+                }
+            ],
+        }
+
+        rows = guba_client._parse_mguba_api_list_items(payload, "600519", "cn")
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn("贵州茅台", rows[0]["title"])
+        self.assertIn("投资者继续讨论分红", rows[0]["summary"])
+        self.assertEqual(rows[0]["source_name"], "tester")
+        self.assertEqual(rows[0]["url"], "https://mguba.eastmoney.com/mguba/article/0/1726810225")
+
 
 if __name__ == "__main__":
     unittest.main()

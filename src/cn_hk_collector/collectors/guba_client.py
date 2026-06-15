@@ -170,6 +170,102 @@ def _parse_mguba_list_html(html: str) -> list[dict]:
     return items
 
 
+def _parse_mguba_api_publish_time(value: str) -> datetime:
+    raw = str(value or "").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(raw, fmt).replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(timezone.utc)
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc)
+
+
+def _build_mguba_api_code(ticker: str, market: str = "cn") -> str:
+    return f"hk{ticker.zfill(5)}" if market == "hk" else ticker
+
+
+def _parse_mguba_api_list_items(payload: dict, ticker: str, market: str = "cn") -> list[dict]:
+    rows = payload.get("re") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return []
+
+    items: list[dict] = []
+    seen_urls: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        post_id = str(row.get("post_id") or "").strip()
+        if not post_id:
+            continue
+        published_dt = _parse_mguba_api_publish_time(str(row.get("post_publish_time") or row.get("post_display_time") or ""))
+        content_text = _guba_html_fragment_to_text(str(row.get("post_content") or row.get("post_abstract") or ""))
+        title = clean_chinese_text(row.get("post_title") or row.get("post_abstract") or "") or content_text[:120]
+        title = re.sub(r"\s+", " ", title).strip()
+        if not title:
+            title = f"Guba post {post_id}"
+        user = row.get("post_user") if isinstance(row.get("post_user"), dict) else {}
+        source_name = str(user.get("user_nickname") or row.get("post_user_nickname") or "Unknown").strip() or "Unknown"
+        url = f"https://mguba.eastmoney.com/mguba/article/0/{post_id}"
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        items.append(
+            {
+                "title": title,
+                "url": url,
+                "source_name": source_name,
+                "published_at": published_dt.isoformat(),
+                "published_dt": published_dt,
+                "summary": content_text or None,
+            }
+        )
+    return items
+
+
+def _fetch_mguba_api_list_page(ticker: str, page: int, market: str = "cn", proxy_manager=None) -> list[dict]:
+    if not proxy_manager:
+        return []
+    code = _build_mguba_api_code(ticker, market)
+    data = {
+        "param": f"code={code}&p={page}&ps=20&sorttype=0",
+        "plat": "wap",
+        "version": "200",
+        "path": "/webarticlelist/api/Article/WebArticleList",
+        "env": "1",
+        "origin": "",
+        "ctoken": "",
+        "utoken": "",
+    }
+    headers = {
+        **DETAIL_API_HEADERS,
+        "Referer": _build_mguba_list_url(ticker, market),
+    }
+    try:
+        proxies = proxy_manager.get_proxy()
+        response = requests.post(
+            "https://mguba.eastmoney.com/mguba2020/interface/GetData.aspx",
+            headers=headers,
+            data=data,
+            timeout=12,
+            proxies=proxies,
+        )
+        if response.status_code in {403, 429}:
+            proxy_manager.mark_invalid(force=True)
+        response.raise_for_status()
+        payload = response.json()
+    except requests.exceptions.RequestException as exc:
+        proxy_manager.mark_invalid(force=True)
+        logger.debug("mguba API list request failed ticker=%s market=%s page=%s: %s", ticker, market, page, exc)
+        return []
+    except ValueError as exc:
+        logger.debug("mguba API list JSON parse failed ticker=%s market=%s page=%s: %s", ticker, market, page, exc)
+        return []
+    if payload.get("rc") != 1:
+        logger.debug("mguba API list returned rc=%s ticker=%s market=%s page=%s", payload.get("rc"), ticker, market, page)
+        return []
+    return _parse_mguba_api_list_items(payload, ticker, market)
+
+
 def _fetch_mguba_list_page(ticker: str, market: str = "cn", proxy_manager=None) -> list[dict]:
     url = _build_mguba_list_url(ticker, market)
     if not proxy_manager:
@@ -192,6 +288,10 @@ def fetch_guba_list_page(ticker: str, page: int, proxy_manager=None, market: str
     Fetch a single list page and return its parsed items.
     Returns (items, should_continue)
     """
+    api_items = _fetch_mguba_api_list_page(ticker, page, market, proxy_manager)
+    if api_items:
+        return api_items, True
+
     url = _build_guba_list_url(ticker, page, market)
     retry_count = 1
     html = ""
@@ -222,6 +322,7 @@ def fetch_guba_list_page(ticker: str, page: int, proxy_manager=None, market: str
                 html = decode_chinese_response(response)
                 if _is_guba_block_page(html):
                     logger.debug("Anti-bot detected for %s use_proxy=%s", url, use_proxy)
+                    html = ""
                     if use_proxy and proxy_manager:
                         proxy_manager.mark_invalid(force=True)
                     retry_count -= 1
@@ -324,6 +425,11 @@ def _guba_html_fragment_to_text(value: str) -> str:
     text = soup.get_text(" ", strip=True)
     text = text.replace("\xa0", " ")
     return clean_chinese_text(text)
+
+
+def _has_body_text(content: str, title: str, *, source_summary: str = "") -> bool:
+    content = clean_chinese_text(content or "")
+    return len(content) >= 10
 
 
 def _parse_guba_api_post_payload(payload: dict) -> dict:
@@ -523,9 +629,9 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
             
         valid_items = []
         
-        # Pinned posts at the top of page 1 might be very old (e.g. from 2021). 
-        # Using the last item on the page provides a reliable chronological anchor.
-        oldest_dt = items[-1]["published_dt"] if items else now_utc
+        dated_items = [it["published_dt"] for it in items if it.get("published_dt")]
+        oldest_dt = min(dated_items) if dated_items else now_utc
+        newest_dt = max(dated_items) if dated_items else now_utc
         
         for it in items:
             pdt = it["published_dt"]
@@ -544,21 +650,22 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
                     
         all_items.extend(valid_items)
         
-        # Custom windows may be older than page 1; keep paging while pages are newer than window_end.
-        if has_custom_window and oldest_dt >= custom_end:
+        # Custom windows may be older than page 1; keep paging while the full page is newer than window_end.
+        if has_custom_window and dated_items and oldest_dt >= custom_end:
             page += 1
             if page > MAX_LIST_PAGES:
                 break
             continue
 
-        # Stop condition: if the oldest post on this page is older than our cutoff
-        if oldest_dt < start_utc:
+        # Stop only when the full page is older than the cutoff. Mobile API pages can contain older outliers.
+        if dated_items and newest_dt < start_utc:
             logger.debug("Reached posts older than cutoff (%s) at page %s. Stopping list fetch.", start_utc, page)
             break
             
         page += 1
         if page > MAX_LIST_PAGES: # hard limit safety
             break
+        time.sleep(0.1)
             
     list_seconds = time.perf_counter() - list_started
     list_proxy_ips = int(getattr(proxy_manager, "ips_fetched", 0) or 0)
@@ -603,9 +710,10 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
             full_text = content_dict["text"] or ""
 
         full_text = full_text.strip()
-        if full_text:
+        list_summary = (it.get("summary") or "").strip()
+        content = full_text or list_summary or it["title"]
+        if _has_body_text(content, it["title"], source_summary=list_summary):
             body_success += 1
-        full_text = full_text or it["title"]
             
         final_records.append({
             "ticker": ticker,
@@ -614,14 +722,15 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
             "channel": "guba",
             "source_name": it["source_name"],
             "title": it["title"],
-            "summary": None,
-            "content": full_text,
+            "summary": list_summary or None,
+            "content": content,
             "url": it["url"],
         })
         
     final_records = apply_length_relevance_filter(final_records, source_type="social")
     detail_success = int(results_report.get("success_count") or body_success)
-    detail_failed = max(len(urls_to_fetch) - detail_success, 0)
+    detail_selected = int(results_report.get("total_urls") or len(urls_to_fetch))
+    detail_failed = max(detail_selected - detail_success, 0)
     detail_total = detail_success + detail_failed
     summary = {
         "ticker": ticker,
@@ -634,9 +743,12 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
         "final_by_channel": dict(Counter(record.get("channel") or "unknown" for record in final_records)),
         "list_proxy_ips": list_proxy_ips,
         "detail_proxy_ips": int(results_report.get("total_ips_used") or 0),
+        "detail_selected": detail_selected,
         "detail_success": detail_success,
         "detail_failed": detail_failed,
         "detail_success_rate": round(detail_success / detail_total, 4) if detail_total else 0,
+        "body_success": body_success,
+        "body_success_rate": round(body_success / len(final_records), 4) if final_records else 0,
         "timed_out": bool(results_report.get("timed_out")),
         "length_filtered": sum(1 for record in final_records if record.get("is_content_relevant") is False),
     }

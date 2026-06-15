@@ -76,11 +76,14 @@ For proxy-pool deployment:
 
 ```powershell
 $env:GUBA_PROXY_MODE="api_pool"
-$env:GUBA_PROXY_API_URL="https://your-proxy-provider.example/api"
+$env:GUBA_PROXY_API_URL="https://share.proxy.qg.net/get?key=<QINGGUO_AUTHKEY>&num=1&distinct=true"
 $env:GUBA_PROXY_MAX_PER_TASK="3"
+$env:GUBA_PROXY_API_MIN_INTERVAL_SECONDS="1.05"
+$env:GUBA_PROXY_AUTH_USER="<QINGGUO_AUTHKEY>"
+$env:GUBA_PROXY_AUTH_PASSWORD="<QINGGUO_AUTHPWD>"
 ```
 
-When `GUBA_PROXY_MODE=api_pool`, Guba detail fetching uses the original SmartBatch scheduler: 8 URL pools, 8 worker threads per pool, 4 proxy slots per pool, and 15 proxy IPs per pool. `GUBA_PROXY_TTL_SECONDS=180` is still used by the Smart proxy manager. `GUBA_PROXY_MAX_PER_TASK=3` belongs to the single-`ProxyManager` list/direct path and does not replace the SmartBatch 15-IP-per-pool detail budget. The `direct`/`off` modes intentionally keep the standalone project runnable without a proxy API and use the lighter direct detail worker path.
+When `GUBA_PROXY_MODE=api_pool`, Guba detail fetching uses the original SmartBatch scheduler: 8 URL pools, 8 worker threads per pool, 4 proxy slots per pool, and 15 proxy IPs per pool. `GUBA_PROXY_TTL_SECONDS=180` is still used by the Smart proxy manager. `GUBA_PROXY_MAX_PER_TASK=3` belongs to the single-`ProxyManager` list/direct path and does not replace the SmartBatch 15-IP-per-pool detail budget. `GUBA_PROXY_API_MIN_INTERVAL_SECONDS` can be used for providers such as Qingguo that rate-limit proxy extraction calls. The proxy API parser accepts both legacy plain-text `ip:port` responses and Qingguo JSON responses where `data[].server` is the proxy endpoint. Qingguo extracted proxy servers require `GUBA_PROXY_AUTH_USER` and `GUBA_PROXY_AUTH_PASSWORD` for target-site requests. The `direct`/`off` modes intentionally keep the standalone project runnable without a proxy API and use the lighter direct detail worker path.
 
 ## Docker
 

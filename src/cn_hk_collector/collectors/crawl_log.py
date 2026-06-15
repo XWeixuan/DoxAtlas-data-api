@@ -53,7 +53,7 @@ def format_media_crawl_summary(summary: dict[str, Any]) -> str:
         f"detail_selected={summary.get('detail_selected', 0)} detail_success={summary.get('detail_success', 0)} "
         f"detail_failed={summary.get('detail_failed', 0)} success_rate={summary.get('detail_success_rate', 0)} "
         f"detail_proxy_ips={summary.get('detail_proxy_ips', 0)} garbled_dropped={summary.get('garbled_dropped', 0)} "
-        f"length_filtered={summary.get('length_filtered', 0)}\n"
+        f"length_filtered={summary.get('length_filtered', 0)} body_success_rate={summary.get('body_success_rate', 0)}\n"
         + _table(
             ["channel", "list", "final", "detail_ok", "detail_fail", "list_fail", "proxy_ip", "list_s"],
             rows,
@@ -70,5 +70,5 @@ def format_social_crawl_summary(summary: dict[str, Any]) -> str:
         f"detail_success={summary.get('detail_success', 0)} detail_failed={summary.get('detail_failed', 0)} "
         f"success_rate={summary.get('detail_success_rate', 0)} timed_out={summary.get('timed_out', False)} "
         f"list_proxy_ips={summary.get('list_proxy_ips', 0)} detail_proxy_ips={summary.get('detail_proxy_ips', 0)} "
-        f"length_filtered={summary.get('length_filtered', 0)}"
+        f"length_filtered={summary.get('length_filtered', 0)} body_success_rate={summary.get('body_success_rate', 0)}"
     )

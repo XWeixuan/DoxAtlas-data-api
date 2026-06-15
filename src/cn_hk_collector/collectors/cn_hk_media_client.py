@@ -43,7 +43,7 @@ DETAIL_FETCH_WORKERS = 32
 DETAIL_CHANNEL_LIMITS = {
     "eastmoney_news": 80,
     "sina_stock_news": 120,
-    "yicai": 50,
+    "yicai": 220,
     "cls_news": 35,
     "cls_telegraph": 35,
     "stcn": 40,
@@ -1027,6 +1027,12 @@ def parse_media_detail_html(html: str) -> Dict[str, Any]:
     return {"full_text": clean_chinese_text(text), "summary": clean_chinese_text(description) or None}
 
 
+def _has_body_text(content: str, title: str) -> bool:
+    content = clean_chinese_text(content or "")
+    title = clean_chinese_text(title or "")
+    return len(content) >= 30 and content != title
+
+
 def _fetch_details(items: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     selected_items = _select_detail_items(items)
     urls = list(dict.fromkeys(item["url"] for item in selected_items if item.get("url")))
@@ -1199,6 +1205,7 @@ def fetch_cn_hk_media_sync(
     final_records: list[dict[str, Any]] = []
     detail_success_by_channel: Counter[str] = Counter()
     detail_failed_by_channel: Counter[str] = Counter()
+    body_success_by_channel: Counter[str] = Counter()
     garbled_dropped = 0
     for item in list_items:
         detail = detail_map.get(item["url"]) or {}
@@ -1215,6 +1222,8 @@ def fetch_cn_hk_media_sync(
             garbled_dropped += 1
             logger.debug("CN/HK media dropping garbled record channel=%s url=%s title=%s", item.get("channel"), item.get("url"), title[:80])
             continue
+        if _has_body_text(content, title):
+            body_success_by_channel[item["channel"]] += 1
         final_records.append(
             {
                 "ticker": ticker,
@@ -1231,8 +1240,9 @@ def fetch_cn_hk_media_sync(
     final_records = apply_length_relevance_filter(final_records, source_type="media")
     final_by_channel = Counter(record.get("channel") or "unknown" for record in final_records)
     detail_success = sum(detail_success_by_channel.values())
-    detail_failed = max(len(selected_detail_urls) - len(detail_map), 0) + sum(detail_failed_by_channel.values())
+    detail_failed = sum(detail_failed_by_channel.values())
     detail_total = detail_success + detail_failed
+    body_success = sum(body_success_by_channel.values())
     summary = {
         "market": market,
         "ticker": ticker,
@@ -1254,6 +1264,9 @@ def fetch_cn_hk_media_sync(
         "detail_success_rate": round(detail_success / detail_total, 4) if detail_total else 0,
         "detail_success_by_channel": dict(detail_success_by_channel),
         "detail_failed_by_channel": dict(detail_failed_by_channel),
+        "body_success": body_success,
+        "body_success_rate": round(body_success / len(final_records), 4) if final_records else 0,
+        "body_success_by_channel": dict(body_success_by_channel),
         "garbled_dropped": garbled_dropped,
         "length_filtered": sum(1 for record in final_records if record.get("is_content_relevant") is False),
     }
