@@ -25,6 +25,7 @@ from cn_hk_collector.collectors.crawl_log import format_media_crawl_summary
 from cn_hk_collector.collectors.guba_utils.ProxyManager import ProxyManager
 from cn_hk_collector.content_filters import apply_length_relevance_filter
 from cn_hk_collector.market import DEFAULT_MARKET, normalize_market, normalize_ticker
+from cn_hk_collector.media_content_relevance import expand_target_aliases
 
 logger = logging.getLogger(__name__)
 
@@ -38,15 +39,17 @@ LIST_HEADERS = {
 }
 
 DETAIL_DEADLINE_SECONDS = 150
-DETAIL_MAX_ATTEMPTS_PER_URL = 1
+DETAIL_MAX_ATTEMPTS_PER_URL = 3
 DETAIL_FETCH_WORKERS = 32
 DETAIL_CHANNEL_LIMITS = {
-    "eastmoney_news": 80,
-    "sina_stock_news": 120,
-    "yicai": 220,
-    "cls_news": 35,
-    "cls_telegraph": 35,
-    "stcn": 40,
+    "eastmoney_news": 300,
+    "eastmoney_announcement": 160,
+    "eastmoney_report": 80,
+    "sina_stock_news": 240,
+    "yicai": 320,
+    "cls_news": 160,
+    "cls_telegraph": 120,
+    "stcn": 100,
 }
 MAX_LIST_PAGES = 5
 EASTMONEY_LIST_PAGES = 30
@@ -176,14 +179,15 @@ def _within_window(published_dt: Optional[datetime], start_utc: datetime, end_ut
 
 
 def _build_search_terms(ticker: str, ticker_info: Optional[Dict[str, Any]] = None) -> List[str]:
-    terms = [ticker]
+    base_terms = [ticker]
     for key in ("org_short_name_cn", "companyName"):
         value = str((ticker_info or {}).get(key) or "").strip()
         if value:
-            terms.append(value)
+            base_terms.append(value)
             normalized = unicodedata.normalize("NFKC", value)
             if normalized and normalized != value:
-                terms.append(normalized)
+                base_terms.append(normalized)
+    terms = expand_target_aliases(ticker, base_terms)
     return list(dict.fromkeys(terms))
 
 
@@ -295,6 +299,44 @@ def _strip_html(text: Any) -> str:
     return clean_chinese_text(value)
 
 
+def _compact_cjk_spaces(value: str) -> str:
+    return re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", clean_chinese_text(value))
+
+
+def _has_target_evidence(text: str, evidence_terms: Iterable[str]) -> bool:
+    search_texts = list(dict.fromkeys([clean_chinese_text(text), _compact_cjk_spaces(text)]))
+    for term in evidence_terms:
+        cleaned = clean_chinese_text(term)
+        if not cleaned:
+            continue
+        term_forms = list(dict.fromkeys([cleaned, _compact_cjk_spaces(cleaned)]))
+        if re.fullmatch(r"[A-Za-z0-9.:-]+", cleaned):
+            for search_text in search_texts:
+                if re.search(rf"(?<![A-Za-z0-9]){re.escape(cleaned)}(?![A-Za-z0-9])", search_text, flags=re.I):
+                    return True
+        elif any(term_form and term_form in search_text for term_form in term_forms for search_text in search_texts):
+            return True
+    return False
+
+
+def _text_from_html_fragment(fragment: Any) -> str:
+    raw = str(fragment or "")
+    if not raw:
+        return ""
+    try:
+        soup = BeautifulSoup(raw, features="lxml")
+        parts = [
+            node.get_text(" ", strip=True)
+            for node in soup.find_all(["p", "li", "blockquote"])
+            if node.get_text(" ", strip=True)
+        ]
+        if not parts:
+            parts = [soup.get_text(" ", strip=True)]
+        return clean_chinese_text(" ".join(parts))
+    except TypeError:
+        return _strip_html(raw)
+
+
 def _cls_flatten_sign_value(key: str, value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -352,7 +394,12 @@ def _first_sentence_title(text: str, fallback: str) -> str:
     return re.split(r"[。；;\n]", cleaned, maxsplit=1)[0][:120].strip() or fallback
 
 
-def _parse_yicai_items(data: Dict[str, Any], query: str, market: str) -> List[Dict[str, Any]]:
+def _parse_yicai_items(
+    data: Dict[str, Any],
+    query: str,
+    market: str,
+    evidence_terms: Optional[Iterable[str]] = None,
+) -> List[Dict[str, Any]]:
     docs = (((data or {}).get("results") or {}).get("docs") or [])
     items: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
@@ -360,8 +407,11 @@ def _parse_yicai_items(data: Dict[str, Any], query: str, market: str) -> List[Di
         title = _strip_html(doc.get("title"))
         desc = _strip_html(doc.get("desc"))
         tags = _strip_html(doc.get("tags"))
+        context = " ".join(part for part in (title, desc, tags) if part)
         raw_url = str(doc.get("url") or "").strip()
         if not title or not raw_url:
+            continue
+        if evidence_terms and not _has_target_evidence(context, evidence_terms):
             continue
         url = urljoin("https://www.yicai.com", raw_url)
         if url in seen_urls:
@@ -382,12 +432,19 @@ def _parse_yicai_items(data: Dict[str, Any], query: str, market: str) -> List[Di
     return items
 
 
-def _fetch_yicai_query(query: str, market: str, page: int, proxy_manager: Optional[ProxyManager] = None) -> List[Dict[str, Any]]:
+def _fetch_yicai_query(
+    query: str,
+    market: str,
+    page: int,
+    proxy_manager: Optional[ProxyManager] = None,
+    evidence_terms: Optional[Iterable[str]] = None,
+) -> List[Dict[str, Any]]:
     try:
         data = _fetch_json(
             "https://m.yicai.com/api/ajax/getSearchResult",
             {"keys": query, "page": max(page - 1, 0), "pagesize": 20},
             f"https://m.yicai.com/search?keys={quote(query)}",
+            proxy_manager=proxy_manager,
         )
     except Exception as exc:
         logger.debug("CN/HK media Yicai mobile fetch failed query=%s page=%s: %s", query, page, exc)
@@ -405,7 +462,7 @@ def _fetch_yicai_query(query: str, market: str, page: int, proxy_manager: Option
             data = {}
     if data.get("status") != 1:
         return []
-    return _parse_yicai_items(data, query, market)
+    return _parse_yicai_items(data, query, market, evidence_terms=evidence_terms)
 
 
 def _parse_jsonp(text: str) -> Dict[str, Any]:
@@ -790,7 +847,13 @@ def _is_valid_sina_stock_news_url(url: str) -> bool:
     return not any(fragment in url for fragment in blocked)
 
 
-def _parse_sina_stock_news_items(html: str, base_url: str, source: MediaSource, market: str) -> List[Dict[str, Any]]:
+def _parse_sina_stock_news_items(
+    html: str,
+    base_url: str,
+    source: MediaSource,
+    market: str,
+    evidence_terms: Optional[Iterable[str]] = None,
+) -> List[Dict[str, Any]]:
     try:
         soup = BeautifulSoup(html, features="lxml")
         container = soup.select_one(".datelist")
@@ -807,6 +870,8 @@ def _parse_sina_stock_news_items(html: str, base_url: str, source: MediaSource, 
     for raw_time, href, raw_title in pattern.findall(fragment):
         title = _strip_html(raw_title)
         if not title:
+            continue
+        if evidence_terms and not _has_target_evidence(title, evidence_terms):
             continue
         url = urljoin(base_url, href)
         if url in seen_urls or not _is_valid_sina_stock_news_url(url):
@@ -829,9 +894,16 @@ def _parse_sina_stock_news_items(html: str, base_url: str, source: MediaSource, 
     return items
 
 
-def _parse_list_items(html: str, base_url: str, source: MediaSource, query: str, market: str) -> List[Dict[str, Any]]:
+def _parse_list_items(
+    html: str,
+    base_url: str,
+    source: MediaSource,
+    query: str,
+    market: str,
+    evidence_terms: Optional[Iterable[str]] = None,
+) -> List[Dict[str, Any]]:
     if source.channel == "sina_stock_news":
-        return _parse_sina_stock_news_items(html, base_url, source, market)
+        return _parse_sina_stock_news_items(html, base_url, source, market, evidence_terms=evidence_terms)
 
     try:
         soup = BeautifulSoup(html, features="lxml")
@@ -917,9 +989,11 @@ def _fetch_source_query(
     start_utc: datetime,
     end_utc: Optional[datetime],
     stats: Optional[dict[str, Any]] = None,
+    evidence_terms: Optional[Iterable[str]] = None,
 ) -> List[Dict[str, Any]]:
     started = time.perf_counter()
     proxy_manager = ProxyManager()
+    target_evidence_terms = list(evidence_terms or expand_target_aliases(ticker, [query]))
     if source.channel == "stcn":
         try:
             items = _fetch_stcn_query(source, query, market, start_utc, end_utc, proxy_manager)
@@ -951,7 +1025,7 @@ def _fetch_source_query(
             break
         try:
             if source.channel == "yicai":
-                items = _fetch_yicai_query(query, market, page, proxy_manager)
+                items = _fetch_yicai_query(query, market, page, proxy_manager, evidence_terms=target_evidence_terms)
             elif source.channel == "eastmoney_news":
                 items = _fetch_eastmoney_news_query(query, market, page, proxy_manager)
             elif source.channel == "eastmoney_announcement":
@@ -962,7 +1036,7 @@ def _fetch_source_query(
                 items = _fetch_cls_sw_query(source, query, market, page, proxy_manager)
             else:
                 html = _fetch_list_html(url, proxy_manager)
-                items = _parse_list_items(html, url, source, query, market)
+                items = _parse_list_items(html, url, source, query, market, evidence_terms=target_evidence_terms)
         except Exception as exc:
             failures += 1
             logger.debug("CN/HK media list fetch failed channel=%s query=%s page=%s: %s", source.channel, query, page, exc)
@@ -991,6 +1065,54 @@ def _fetch_source_query(
     return collected
 
 
+DETAIL_BODY_SELECTORS = (
+    ".m-txt",
+    ".m-text",
+    ".article-content",
+    ".articleContent",
+    ".article_body",
+    ".articleBody",
+    ".newsContent",
+    ".Body",
+    "#ContentBody",
+    "article",
+    "main",
+)
+
+
+def _extract_next_data_article(soup: BeautifulSoup) -> Dict[str, Any]:
+    node = soup.find("script", id="__NEXT_DATA__")
+    if not node:
+        return {}
+    payload = node.string or node.get_text("", strip=True)
+    if not payload:
+        return {}
+    try:
+        data = json.loads(payload)
+    except ValueError:
+        return {}
+    page_props = ((data or {}).get("props") or {}).get("pageProps") or {}
+    detail = page_props.get("articleDetail") or page_props.get("detail") or {}
+    if not isinstance(detail, dict):
+        return {}
+    content = _text_from_html_fragment(detail.get("content") or detail.get("detail") or "")
+    brief = clean_chinese_text(detail.get("brief") or detail.get("summary") or detail.get("description") or "")
+    return {"full_text": content, "summary": brief or None}
+
+
+def _extract_best_body_text(soup: BeautifulSoup) -> str:
+    candidates: list[str] = []
+    for selector in DETAIL_BODY_SELECTORS:
+        for node in soup.select(selector):
+            text = _text_from_html_fragment(str(node))
+            if text:
+                candidates.append(text)
+    if not candidates:
+        paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
+        candidates.append(clean_chinese_text(" ".join(p for p in paragraphs if p)))
+    return max(candidates, key=len, default="")
+
+
 def parse_media_detail_html(html: str) -> Dict[str, Any]:
     text = ""
     try:
@@ -1004,21 +1126,15 @@ def parse_media_detail_html(html: str) -> Dict[str, Any]:
         soup = BeautifulSoup(html, features="lxml")
     except TypeError:
         paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", html or "", flags=re.I | re.S)
-        fallback_text = "\n".join(re.sub(r"<[^>]+>", "", p).strip() for p in paragraphs if p)
-        return {"full_text": fallback_text.strip(), "summary": None}
+        fallback_text = " ".join(_strip_html(p) for p in paragraphs if p)
+        return {"full_text": clean_chinese_text(fallback_text), "summary": None}
+
+    next_data = _extract_next_data_article(soup)
+    if next_data.get("full_text"):
+        return next_data
+
     if not text:
-        body = (
-            soup.select_one(".m-txt")
-            or soup.select_one("#ContentBody")
-            or soup.find("article")
-            or soup.find("main")
-            or soup.find("div", class_=re.compile("content|article|detail", re.I))
-        )
-        if body:
-            paragraphs = [p.get_text(" ", strip=True) for p in body.find_all("p")]
-        else:
-            paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
-        text = "\n".join(p for p in paragraphs if p)
+        text = _extract_best_body_text(soup)
 
     description = ""
     meta = soup.find("meta", attrs={"name": "description"})
@@ -1075,21 +1191,31 @@ def _fetch_detail_proxy(url: str, proxy_manager: ProxyManager) -> Dict[str, Any]
     actual_url = url
     if not actual_url.startswith("http"):
         actual_url = urljoin("https://www.cls.cn", actual_url)
-    try:
-        proxies = proxy_manager.get_proxy()
-    except Exception as exc:
-        logger.debug("CN/HK media detail proxy unavailable for %s: %s", actual_url, exc)
-        return {}
-    resp = session.get(actual_url, headers=LIST_HEADERS, timeout=10, proxies=proxies)
-    if resp.status_code != 200:
-        if resp.status_code in {403, 429}:
+    for attempt in range(DETAIL_MAX_ATTEMPTS_PER_URL):
+        try:
+            proxies = proxy_manager.get_proxy()
+        except Exception as exc:
+            logger.debug("CN/HK media detail proxy unavailable for %s: %s", actual_url, exc)
+            return {}
+        try:
+            resp = session.get(actual_url, headers=LIST_HEADERS, timeout=12, proxies=proxies)
+        except requests.RequestException as exc:
+            proxy_manager.mark_invalid()
+            logger.debug("CN/HK media detail request failed for %s attempt=%s: %s", actual_url, attempt + 1, exc)
+            continue
+        if resp.status_code != 200:
+            if resp.status_code in {403, 429} or resp.status_code >= 500:
+                proxy_manager.mark_invalid(force=True)
+                continue
+            return {}
+        html = decode_chinese_response(resp)
+        if "sys-guard" in html or "访问过于频繁" in html:
             proxy_manager.mark_invalid(force=True)
-        return {}
-    html = decode_chinese_response(resp)
-    if "sys-guard" in html or "访问过于频繁" in html:
-        proxy_manager.mark_invalid(force=True)
-        return {}
-    return parse_media_detail_html(html)
+            continue
+        detail = parse_media_detail_html(html)
+        if detail.get("full_text"):
+            return detail
+    return {}
 
 
 def _select_detail_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1159,7 +1285,19 @@ def fetch_cn_hk_media_sync(
     with ThreadPoolExecutor(max_workers=LIST_FETCH_WORKERS) as executor:
         for source in sources:
             for term in search_terms:
-                jobs.append(executor.submit(_fetch_source_query, source, ticker, market, term, start_utc, end_utc, stats))
+                jobs.append(
+                    executor.submit(
+                        _fetch_source_query,
+                        source,
+                        ticker,
+                        market,
+                        term,
+                        start_utc,
+                        end_utc,
+                        stats,
+                        search_terms,
+                    )
+                )
 
         list_items: list[dict[str, Any]] = []
         for future in as_completed(jobs):

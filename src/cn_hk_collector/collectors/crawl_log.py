@@ -62,11 +62,20 @@ def format_media_crawl_summary(summary: dict[str, Any]) -> str:
 
 
 def format_social_crawl_summary(summary: dict[str, Any]) -> str:
+    page_suffix = ""
+    if summary.get("list_pages_scanned") is not None:
+        page_suffix = (
+            f" pages={summary.get('list_pages_scanned')} "
+            f"page_range={summary.get('list_start_page', 0)}-{summary.get('list_last_page', 0)} "
+            f"page_requests={summary.get('list_page_requests', 0)} "
+            f"max_pages={summary.get('list_max_pages', 0)}"
+        )
     return (
         "\n[CN/HK Social Crawl Summary]\n"
         f"ticker={summary.get('ticker')} channel={summary.get('channel')}\n"
         f"records={summary.get('records')} list_items={summary.get('list_items')} "
-        f"list={summary.get('list_seconds')}s detail={summary.get('detail_seconds')}s total={summary.get('total_seconds')}s\n"
+        f"list={summary.get('list_seconds')}s detail={summary.get('detail_seconds')}s total={summary.get('total_seconds')}s"
+        f"{page_suffix}\n"
         f"detail_success={summary.get('detail_success', 0)} detail_failed={summary.get('detail_failed', 0)} "
         f"success_rate={summary.get('detail_success_rate', 0)} timed_out={summary.get('timed_out', False)} "
         f"list_proxy_ips={summary.get('list_proxy_ips', 0)} detail_proxy_ips={summary.get('detail_proxy_ips', 0)} "

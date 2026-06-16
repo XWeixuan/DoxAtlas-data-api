@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import unittest
 from unittest import mock
+from datetime import datetime, timedelta, timezone
 
 from cn_hk_collector.collectors import guba_client
 from cn_hk_collector.collectors.guba_utils.SmartBatchCrawler import GlobalScheduler, UrlPool
@@ -87,6 +88,88 @@ class GubaSmartSchedulerTest(unittest.TestCase):
         self.assertIn("投资者继续讨论分红", rows[0]["summary"])
         self.assertEqual(rows[0]["source_name"], "tester")
         self.assertEqual(rows[0]["url"], "https://mguba.eastmoney.com/mguba/article/0/1726810225")
+
+    def test_mguba_api_list_page_retries_transient_proxy_failure(self) -> None:
+        class FakeProxyManager:
+            def __init__(self) -> None:
+                self.invalidated = 0
+
+            def get_proxy(self) -> dict:
+                return {"http": "http://proxy.test:8080", "https": "http://proxy.test:8080"}
+
+            def mark_invalid(self, force=False) -> None:
+                if force:
+                    self.invalidated += 1
+
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {
+                    "rc": 1,
+                    "re": [
+                        {
+                            "post_id": 1726810225,
+                            "post_title": "Ningde retry test",
+                            "post_publish_time": "2026-06-16 12:00:00",
+                            "post_user": {"user_nickname": "tester"},
+                        }
+                    ],
+                }
+
+        proxy_manager = FakeProxyManager()
+        with mock.patch.dict(os.environ, {"GUBA_LIST_API_MAX_ATTEMPTS": "2"}), mock.patch.object(
+            guba_client.requests,
+            "post",
+            side_effect=[guba_client.requests.exceptions.Timeout("boom"), FakeResponse()],
+        ) as post:
+            rows = guba_client._fetch_mguba_api_list_page("300750", 7, "cn", proxy_manager)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["title"], "Ningde retry test")
+        self.assertEqual(proxy_manager.invalidated, 1)
+        self.assertEqual(post.call_count, 2)
+
+    def test_custom_window_seeks_to_older_guba_pages(self) -> None:
+        calls: list[int] = []
+        base_dt = datetime(2026, 6, 17, 12, tzinfo=timezone.utc)
+
+        def fake_fetch_page(ticker, page, proxy_manager=None, market="cn"):
+            calls.append(page)
+            published_dt = base_dt - timedelta(days=page)
+            return [
+                {
+                    "title": f"page {page}",
+                    "url": f"https://mguba.eastmoney.com/mguba/article/0/{page}",
+                    "source_name": "tester",
+                    "published_at": published_dt.isoformat(),
+                    "published_dt": published_dt,
+                    "summary": "body text for retry seek test",
+                }
+            ], True
+
+        with mock.patch.dict(os.environ, {"GUBA_MAX_LIST_PAGES": "64"}), mock.patch.object(
+            guba_client,
+            "fetch_guba_list_page",
+            side_effect=fake_fetch_page,
+        ), mock.patch.object(guba_client, "ProxyManager", return_value=object()), mock.patch.object(
+            guba_client,
+            "_fetch_guba_details_proxy",
+            return_value={"data": {}, "total_urls": 1, "success_count": 0, "total_ips_used": 0, "timed_out": False},
+        ):
+            rows = guba_client.fetch_guba_posts_sync(
+                "300750",
+                window_start="2026-05-18T00:00:00+00:00",
+                window_end="2026-05-19T00:00:00+00:00",
+            )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["title"], "page 30")
+        self.assertIn(30, calls)
+        self.assertLess(len(calls), 15)
 
 
 if __name__ == "__main__":

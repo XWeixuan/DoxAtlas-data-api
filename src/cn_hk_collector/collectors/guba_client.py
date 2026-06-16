@@ -44,8 +44,29 @@ DETAIL_MAX_ATTEMPTS_PER_URL = 1
 DETAIL_DIRECT_DEADLINE_SECONDS = 60
 DETAIL_DIRECT_WORKERS = 32
 DETAIL_DIRECT_LIMIT = int(os.environ.get("GUBA_DETAIL_DIRECT_LIMIT", "500"))
-MAX_LIST_PAGES = 100
+DEFAULT_MAX_LIST_PAGES = 600
 DIRECT_PROXY_MODES = {"direct", "none", "off"}
+
+
+def _guba_list_api_max_attempts() -> int:
+    try:
+        return max(1, int(os.environ.get("GUBA_LIST_API_MAX_ATTEMPTS", "4")))
+    except ValueError:
+        return 4
+
+
+def _guba_max_list_pages() -> int:
+    try:
+        return max(1, int(os.environ.get("GUBA_MAX_LIST_PAGES", str(DEFAULT_MAX_LIST_PAGES))))
+    except ValueError:
+        return DEFAULT_MAX_LIST_PAGES
+
+
+def _guba_list_page_size() -> int:
+    try:
+        return min(100, max(20, int(os.environ.get("GUBA_LIST_PAGE_SIZE", "100"))))
+    except ValueError:
+        return 100
 
 
 def _extract_guba_ticker_from_url(url: str) -> str | None:
@@ -226,8 +247,9 @@ def _fetch_mguba_api_list_page(ticker: str, page: int, market: str = "cn", proxy
     if not proxy_manager:
         return []
     code = _build_mguba_api_code(ticker, market)
+    page_size = _guba_list_page_size()
     data = {
-        "param": f"code={code}&p={page}&ps=20&sorttype=0",
+        "param": f"code={code}&p={page}&ps={page_size}&sorttype=0",
         "plat": "wap",
         "version": "200",
         "path": "/webarticlelist/api/Article/WebArticleList",
@@ -240,30 +262,62 @@ def _fetch_mguba_api_list_page(ticker: str, page: int, market: str = "cn", proxy
         **DETAIL_API_HEADERS,
         "Referer": _build_mguba_list_url(ticker, market),
     }
-    try:
-        proxies = proxy_manager.get_proxy()
-        response = requests.post(
-            "https://mguba.eastmoney.com/mguba2020/interface/GetData.aspx",
-            headers=headers,
-            data=data,
-            timeout=12,
-            proxies=proxies,
-        )
-        if response.status_code in {403, 429}:
+    max_attempts = _guba_list_api_max_attempts()
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            proxies = proxy_manager.get_proxy()
+            response = requests.post(
+                "https://mguba.eastmoney.com/mguba2020/interface/GetData.aspx",
+                headers=headers,
+                data=data,
+                timeout=12,
+                proxies=proxies,
+            )
+            if response.status_code in {403, 429}:
+                proxy_manager.mark_invalid(force=True)
+            response.raise_for_status()
+            payload = response.json()
+        except requests.exceptions.RequestException as exc:
+            last_error = exc
             proxy_manager.mark_invalid(force=True)
-        response.raise_for_status()
-        payload = response.json()
-    except requests.exceptions.RequestException as exc:
-        proxy_manager.mark_invalid(force=True)
-        logger.debug("mguba API list request failed ticker=%s market=%s page=%s: %s", ticker, market, page, exc)
-        return []
-    except ValueError as exc:
-        logger.debug("mguba API list JSON parse failed ticker=%s market=%s page=%s: %s", ticker, market, page, exc)
-        return []
-    if payload.get("rc") != 1:
-        logger.debug("mguba API list returned rc=%s ticker=%s market=%s page=%s", payload.get("rc"), ticker, market, page)
-        return []
-    return _parse_mguba_api_list_items(payload, ticker, market)
+            logger.debug(
+                "mguba API list request failed ticker=%s market=%s page=%s attempt=%s/%s: %s",
+                ticker,
+                market,
+                page,
+                attempt,
+                max_attempts,
+                exc,
+            )
+            continue
+        except ValueError as exc:
+            last_error = exc
+            proxy_manager.mark_invalid(force=True)
+            logger.debug(
+                "mguba API list JSON parse failed ticker=%s market=%s page=%s attempt=%s/%s: %s",
+                ticker,
+                market,
+                page,
+                attempt,
+                max_attempts,
+                exc,
+            )
+            continue
+        if payload.get("rc") != 1:
+            logger.debug("mguba API list returned rc=%s ticker=%s market=%s page=%s", payload.get("rc"), ticker, market, page)
+            return []
+        return _parse_mguba_api_list_items(payload, ticker, market)
+
+    logger.debug(
+        "mguba API list exhausted retries ticker=%s market=%s page=%s attempts=%s last_error=%s",
+        ticker,
+        market,
+        page,
+        max_attempts,
+        last_error,
+    )
+    return []
 
 
 def _fetch_mguba_list_page(ticker: str, market: str = "cn", proxy_manager=None) -> list[dict]:
@@ -602,6 +656,13 @@ def _fetch_guba_details_direct(urls: list[str]) -> dict:
     return _fetch_guba_details_direct_pool(urls)
 
 
+def _guba_page_bounds(items: list[dict], fallback: datetime) -> tuple[list[datetime], datetime, datetime]:
+    dated_items = [it["published_dt"] for it in items if it.get("published_dt")]
+    oldest_dt = min(dated_items) if dated_items else fallback
+    newest_dt = max(dated_items) if dated_items else fallback
+    return dated_items, oldest_dt, newest_dt
+
+
 def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None, window_end=None, market: str = "cn") -> list:
     crawl_started = time.perf_counter()
     logger.debug("Fetching Guba posts for %s (lookback=%sd)...", ticker, lookback_days)
@@ -618,20 +679,77 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
         
     proxy_manager = ProxyManager()
     all_items = []
-    page = 1
+    max_list_pages = _guba_max_list_pages()
+    page_cache: dict[int, tuple[list[dict], bool]] = {}
+    list_started = time.perf_counter()
+
+    def get_list_page(page_no: int) -> tuple[list[dict], bool]:
+        if page_no < 1 or page_no > max_list_pages:
+            return [], False
+        cached = page_cache.get(page_no)
+        if cached is not None:
+            return cached
+        result = fetch_guba_list_page(ticker, page_no, proxy_manager, market=market)
+        page_cache[page_no] = result
+        return result
+
+    def find_custom_window_start_page() -> int:
+        if not has_custom_window:
+            return 1
+        first_items, _ = get_list_page(1)
+        if not first_items:
+            return 1
+        dated_items, oldest_dt, _ = _guba_page_bounds(first_items, now_utc)
+        if not dated_items or oldest_dt < custom_end:
+            return 1
+
+        low = 1
+        high = 2
+        while high <= max_list_pages:
+            items, _ = get_list_page(high)
+            if not items:
+                return high
+            dated_items, oldest_dt, _ = _guba_page_bounds(items, now_utc)
+            if dated_items and oldest_dt < custom_end:
+                break
+            low = high
+            high *= 2
+
+        high = min(high, max_list_pages)
+        result = high
+        left = low + 1
+        right = high
+        while left <= right:
+            mid = (left + right) // 2
+            items, _ = get_list_page(mid)
+            if not items:
+                result = mid
+                right = mid - 1
+                continue
+            dated_items, oldest_dt, _ = _guba_page_bounds(items, now_utc)
+            if dated_items and oldest_dt < custom_end:
+                result = mid
+                right = mid - 1
+            else:
+                left = mid + 1
+        return max(1, result)
+
+    page = find_custom_window_start_page()
+    first_scanned_page = page
+    last_scanned_page = 0
     
     # --- Step 1: Fetch list pages ---
-    list_started = time.perf_counter()
     while True:
-        items, success = fetch_guba_list_page(ticker, page, proxy_manager, market=market)
+        if page > max_list_pages:
+            break
+        items, success = get_list_page(page)
         if not items:
             break
+        last_scanned_page = page
             
         valid_items = []
         
-        dated_items = [it["published_dt"] for it in items if it.get("published_dt")]
-        oldest_dt = min(dated_items) if dated_items else now_utc
-        newest_dt = max(dated_items) if dated_items else now_utc
+        dated_items, oldest_dt, newest_dt = _guba_page_bounds(items, now_utc)
         
         for it in items:
             pdt = it["published_dt"]
@@ -653,8 +771,6 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
         # Custom windows may be older than page 1; keep paging while the full page is newer than window_end.
         if has_custom_window and dated_items and oldest_dt >= custom_end:
             page += 1
-            if page > MAX_LIST_PAGES:
-                break
             continue
 
         # Stop only when the full page is older than the cutoff. Mobile API pages can contain older outliers.
@@ -663,12 +779,12 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
             break
             
         page += 1
-        if page > MAX_LIST_PAGES: # hard limit safety
-            break
         time.sleep(0.1)
             
     list_seconds = time.perf_counter() - list_started
     list_proxy_ips = int(getattr(proxy_manager, "ips_fetched", 0) or 0)
+    pages_scanned = max(0, last_scanned_page - first_scanned_page + 1) if last_scanned_page else 0
+    page_requests = len(page_cache)
     if not all_items:
         summary = {
             "ticker": ticker,
@@ -685,6 +801,11 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
             "detail_success_rate": 0,
             "timed_out": False,
             "length_filtered": 0,
+            "list_start_page": first_scanned_page,
+            "list_last_page": last_scanned_page,
+            "list_pages_scanned": pages_scanned,
+            "list_page_requests": page_requests,
+            "list_max_pages": max_list_pages,
         }
         logger.info(format_social_crawl_summary(summary))
         return []
@@ -751,6 +872,11 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
         "body_success_rate": round(body_success / len(final_records), 4) if final_records else 0,
         "timed_out": bool(results_report.get("timed_out")),
         "length_filtered": sum(1 for record in final_records if record.get("is_content_relevant") is False),
+        "list_start_page": first_scanned_page,
+        "list_last_page": last_scanned_page,
+        "list_pages_scanned": pages_scanned,
+        "list_page_requests": page_requests,
+        "list_max_pages": max_list_pages,
     }
     logger.info(format_social_crawl_summary(summary))
     return final_records

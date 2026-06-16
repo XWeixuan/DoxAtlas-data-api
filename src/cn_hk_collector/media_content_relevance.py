@@ -1,8 +1,26 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
+
+
+CORPORATE_NAME_SUFFIXES = (
+    "股份有限公司",
+    "控股有限公司",
+    "集团有限公司",
+    "有限责任公司",
+    "有限公司",
+)
+BUSINESS_FORM_SUFFIXES = (
+    "控股",
+    "集团",
+    "股份",
+    "科技",
+)
+MARKET_SUFFIX_RE = re.compile(r"(?:-W|\.HK|\.SZ|\.SH|\.SS)$", re.I)
+CJK_SPACED_RE = re.compile(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])")
 
 
 NEGATIVE_PATTERNS = (
@@ -45,6 +63,47 @@ def _normalize_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def _compact_cjk_spaces(value: str) -> str:
+    return CJK_SPACED_RE.sub("", _normalize_text(value))
+
+
+def _strip_market_suffix(value: str) -> str:
+    previous = value
+    while previous:
+        stripped = MARKET_SUFFIX_RE.sub("", previous).strip()
+        if stripped == previous:
+            return stripped
+        previous = stripped
+    return previous
+
+
+def _is_company_name_alias(value: str) -> bool:
+    return len(re.findall(r"[\u4e00-\u9fff]", value)) >= 2
+
+
+def _controlled_alias_variants(value: str) -> list[str]:
+    base = unicodedata.normalize("NFKC", _compact_cjk_spaces(value))
+    base = _strip_market_suffix(base)
+    variants = [base] if base else []
+
+    for suffix in CORPORATE_NAME_SUFFIXES:
+        if base.endswith(suffix):
+            stripped = base[: -len(suffix)].strip()
+            if _is_company_name_alias(stripped):
+                variants.append(stripped)
+            break
+
+    for candidate in list(variants):
+        for suffix in BUSINESS_FORM_SUFFIXES:
+            if candidate.endswith(suffix):
+                stripped = candidate[: -len(suffix)].strip()
+                if _is_company_name_alias(stripped):
+                    variants.append(stripped)
+                break
+
+    return list(dict.fromkeys(alias for alias in variants if alias))
+
+
 def _normalize_code(value: str) -> str:
     cleaned = re.sub(r"[^0-9A-Za-z]", "", str(value or "")).upper()
     if cleaned.endswith("HK"):
@@ -63,25 +122,43 @@ def _target_aliases(ticker: str, aliases: Optional[Iterable[str]] = None) -> lis
         value = _normalize_text(alias)
         if not value:
             continue
-        normalized.append(value)
-        code = _normalize_code(value)
-        if code and code != value:
-            normalized.append(code)
-        if code.isdigit() and len(code) <= 5:
-            normalized.append(code.zfill(4))
-            normalized.append(code.zfill(5))
+        for variant in _controlled_alias_variants(value):
+            normalized.append(variant)
+            compacted = _compact_cjk_spaces(variant)
+            if compacted and compacted != variant:
+                normalized.append(compacted)
+            code = _normalize_code(variant)
+            if code and code != variant:
+                normalized.append(code)
+            if code.isdigit() and len(code) <= 5:
+                normalized.append(code.zfill(4))
+                normalized.append(code.zfill(5))
     return list(dict.fromkeys(normalized))
+
+
+def expand_target_aliases(ticker: str, aliases: Optional[Iterable[str]] = None) -> list[str]:
+    return _target_aliases(ticker, aliases)
 
 
 def _count_alias_mentions(text: str, aliases: Iterable[str]) -> int:
     count = 0
+    search_texts = list(dict.fromkeys([text, _compact_cjk_spaces(text)]))
     for alias in aliases:
         if not alias:
             continue
+        alias_forms = list(dict.fromkeys([alias, _compact_cjk_spaces(alias)]))
+        alias_count = 0
         if re.fullmatch(r"[A-Za-z0-9.:-]+", alias):
-            count += len(re.findall(rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])", text, flags=re.I))
+            for search_text in search_texts:
+                alias_count = max(
+                    alias_count,
+                    len(re.findall(rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])", search_text, flags=re.I)),
+                )
         else:
-            count += text.count(alias)
+            for search_text in search_texts:
+                for alias_form in alias_forms:
+                    alias_count = max(alias_count, search_text.count(alias_form))
+        count += alias_count
     return count
 
 

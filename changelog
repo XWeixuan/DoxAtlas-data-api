@@ -8,3 +8,12 @@
 - Added final body-text success metrics and used Guba list `post_content` as social content fallback.
 - Raised the Yicai media detail cap to improve final media body coverage.
 - Made Guba list pagination stop only when a whole page is older than the requested window.
+- Added retryable Guba mobile list API page fetches so transient short-lived proxy failures do not terminate older custom-window pagination.
+- Replaced real-looking proxy/API secrets in `.env.example` with placeholders and documented `GUBA_LIST_API_MAX_ATTEMPTS`.
+- Made Guba list pagination depth configurable with `GUBA_MAX_LIST_PAGES=600` and added a custom-window page seek so high-volume tickers can reach older 7-day windows without scanning from page 1.
+- Increased the Guba mobile list API page size to a configurable, tested-stable `GUBA_LIST_PAGE_SIZE=100` to reduce high-volume ticker window pagination cost.
+- Included custom-window seek time in the Guba social `list` duration metric and added page-range/page-request fields to the social crawl summary.
+
+2026-06-17
+- Improved CN/HK media body capture by expanding detail-fetch coverage, retrying transient detail proxy failures, parsing CLS Next.js article bodies, and using controlled company-name suffix aliases without changing relevance thresholds.
+- Added alias-aware yicai and Sina list-item evidence filtering so records with no target ticker/name evidence are dropped before detail fetch and relevance labeling.
