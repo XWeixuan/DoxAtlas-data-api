@@ -132,3 +132,5 @@ curl -s -X POST http://106.52.126.254:8028/v1/crawl-tasks \
 curl -s http://106.52.126.254:8028/v1/crawl-tasks/你的task_id
 
 curl -s -X POST http://106.52.126.254:8028/v1/crawl-tasks/你的task_id/pull
+
+docker compose up -d --build --force-recreate --no-deps api
