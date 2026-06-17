@@ -81,12 +81,13 @@ $env:GUBA_PROXY_MAX_PER_TASK="3"
 $env:GUBA_PROXY_API_MIN_INTERVAL_SECONDS="1.05"
 $env:GUBA_LIST_API_MAX_ATTEMPTS="4"
 $env:GUBA_LIST_PAGE_SIZE="100"
-$env:GUBA_MAX_LIST_PAGES="600"
+$env:GUBA_MAX_LIST_PAGES="3000"
+$env:GUBA_SOCIAL_ANALYSIS_QUOTA_PER_7D="3000"
 $env:GUBA_PROXY_AUTH_USER="<QINGGUO_AUTHKEY>"
 $env:GUBA_PROXY_AUTH_PASSWORD="<QINGGUO_AUTHPWD>"
 ```
 
-When `GUBA_PROXY_MODE=api_pool`, Guba detail fetching uses the original SmartBatch scheduler: 8 URL pools, 8 worker threads per pool, 4 proxy slots per pool, and 15 proxy IPs per pool. `GUBA_PROXY_TTL_SECONDS=180` is still used by the Smart proxy manager. `GUBA_PROXY_MAX_PER_TASK=3` belongs to the single-`ProxyManager` list/direct path and does not replace the SmartBatch 15-IP-per-pool detail budget. `GUBA_LIST_API_MAX_ATTEMPTS=4` controls per-page retries for the Guba mobile list API so a transient short-lived proxy failure does not stop pagination before an older custom window is reached. `GUBA_LIST_PAGE_SIZE=100` uses the largest tested stable Guba list page size. `GUBA_MAX_LIST_PAGES=600` is the hard list-pagination ceiling; high-volume tickers such as `300750` can require more than 100 pages to reach older 7-day windows when page size is lower. `GUBA_PROXY_API_MIN_INTERVAL_SECONDS` can be used for providers such as Qingguo that rate-limit proxy extraction calls. The proxy API parser accepts both legacy plain-text `ip:port` responses and Qingguo JSON responses where `data[].server` is the proxy endpoint. Qingguo extracted proxy servers require `GUBA_PROXY_AUTH_USER` and `GUBA_PROXY_AUTH_PASSWORD` for target-site requests. The `direct`/`off` modes intentionally keep the standalone project runnable without a proxy API and use the lighter direct detail worker path.
+When `GUBA_PROXY_MODE=api_pool`, Guba detail fetching uses the original SmartBatch scheduler: 8 URL pools, 8 worker threads per pool, 4 proxy slots per pool, and 15 proxy IPs per pool. `GUBA_PROXY_TTL_SECONDS=180` is still used by the Smart proxy manager. `GUBA_PROXY_MAX_PER_TASK=3` belongs to the single-`ProxyManager` list/direct path and does not replace the SmartBatch 15-IP-per-pool detail budget. `GUBA_LIST_API_MAX_ATTEMPTS=4` controls per-page retries for the Guba mobile list API so a transient short-lived proxy failure does not stop pagination before an older custom window is reached. `GUBA_LIST_PAGE_SIZE=100` requests the largest tested list page size, while the upstream API may still cap later pages lower. `GUBA_MAX_LIST_PAGES=3000` is the hard list-pagination ceiling for high-volume custom windows. `GUBA_SOCIAL_ANALYSIS_QUOTA_PER_7D=3000` marks at most 3000 seven-day social rows as analysis-selected after quality filtering and day/tier stratified sampling; all raw social rows are still persisted and returned with audit fields. Guba detail fetching no longer has a fixed 500-row cap; only rows selected for analysis and marked `social_detail_required=true` are sent to detail workers. `GUBA_PROXY_API_MIN_INTERVAL_SECONDS` can be used for providers such as Qingguo that rate-limit proxy extraction calls. The proxy API parser accepts both legacy plain-text `ip:port` responses and Qingguo JSON responses where `data[].server` is the proxy endpoint. Qingguo extracted proxy servers require `GUBA_PROXY_AUTH_USER` and `GUBA_PROXY_AUTH_PASSWORD` for target-site requests. The `direct`/`off` modes intentionally keep the standalone project runnable without a proxy API and use the lighter direct detail worker path.
 
 ## Docker
 
@@ -109,7 +110,7 @@ docker compose run --rm collector smoke --cn-ticker 600519 --hk-ticker 0700 --lo
 - The project is intentionally limited to collection, raw-table persistence, and API handoff.
 - It does not call DoxAtlas task orchestration, Supabase clients, frontend APIs, or LLM analysis code.
 - `raw_media.is_content_relevant=false` is used for long media and media classified as irrelevant.
-- `raw_social.is_content_relevant=false` is used for long Guba posts.
+- `raw_social.is_content_relevant=true` marks rows selected for downstream analysis. Low-quality rows and stratified-sampling overflow rows are kept in `raw_social` with `is_content_relevant=false`, `social_selected_for_analysis=false`, and quality/sampling reason fields.
 
 ---
 Debug

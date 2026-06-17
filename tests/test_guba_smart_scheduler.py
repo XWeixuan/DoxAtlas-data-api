@@ -67,6 +67,19 @@ class GubaSmartSchedulerTest(unittest.TestCase):
         scheduler.assert_not_called()
         self.assertIs(report, expected)
 
+    def test_detail_fetch_no_longer_caps_urls_at_legacy_limit(self) -> None:
+        urls = [f"https://example.test/{index}" for index in range(650)]
+        expected = {"data": {}, "total_urls": len(urls), "success_count": 0, "missing_count": len(urls)}
+
+        with mock.patch.dict(os.environ, {"GUBA_PROXY_MODE": "direct", "GUBA_DETAIL_DIRECT_LIMIT": "500"}), mock.patch.object(
+            guba_client, "_fetch_guba_details_direct_pool", return_value=expected
+        ) as direct_pool:
+            report = guba_client._fetch_guba_details_proxy(urls)
+
+        sent_urls = direct_pool.call_args.args[0]
+        self.assertEqual(len(sent_urls), len(urls))
+        self.assertEqual(report["total_urls"], len(urls))
+
     def test_parse_mguba_api_list_items_uses_content_when_title_is_empty(self) -> None:
         payload = {
             "rc": 1,
@@ -137,7 +150,7 @@ class GubaSmartSchedulerTest(unittest.TestCase):
         calls: list[int] = []
         base_dt = datetime(2026, 6, 17, 12, tzinfo=timezone.utc)
 
-        def fake_fetch_page(ticker, page, proxy_manager=None, market="cn"):
+        def fake_fetch_page(ticker, page, proxy_manager=None, market="cn", allow_html_fallback=True):
             calls.append(page)
             published_dt = base_dt - timedelta(days=page)
             return [
@@ -170,6 +183,35 @@ class GubaSmartSchedulerTest(unittest.TestCase):
         self.assertEqual(rows[0]["title"], "page 30")
         self.assertIn(30, calls)
         self.assertLess(len(calls), 15)
+
+    def test_custom_window_list_page_failure_is_not_treated_as_end(self) -> None:
+        base_dt = datetime(2026, 6, 17, 12, tzinfo=timezone.utc)
+
+        def fake_fetch_page(ticker, page, proxy_manager=None, market="cn", allow_html_fallback=True):
+            if page == 1:
+                return [
+                    {
+                        "title": "new page",
+                        "url": "https://mguba.eastmoney.com/mguba/article/0/1",
+                        "source_name": "tester",
+                        "published_at": base_dt.isoformat(),
+                        "published_dt": base_dt,
+                        "summary": "业绩改善和火电利润修复",
+                    }
+                ], True
+            return [], False
+
+        with mock.patch.dict(os.environ, {"GUBA_MAX_LIST_PAGES": "8"}), mock.patch.object(
+            guba_client,
+            "fetch_guba_list_page",
+            side_effect=fake_fetch_page,
+        ), mock.patch.object(guba_client, "ProxyManager", return_value=object()):
+            with self.assertRaisesRegex(RuntimeError, "guba_list_page_failed:page=2"):
+                guba_client.fetch_guba_posts_sync(
+                    "601991",
+                    window_start="2026-06-10T00:00:00+00:00",
+                    window_end="2026-06-11T00:00:00+00:00",
+                )
 
 
 if __name__ == "__main__":

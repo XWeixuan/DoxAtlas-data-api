@@ -79,5 +79,9 @@ def format_social_crawl_summary(summary: dict[str, Any]) -> str:
         f"detail_success={summary.get('detail_success', 0)} detail_failed={summary.get('detail_failed', 0)} "
         f"success_rate={summary.get('detail_success_rate', 0)} timed_out={summary.get('timed_out', False)} "
         f"list_proxy_ips={summary.get('list_proxy_ips', 0)} detail_proxy_ips={summary.get('detail_proxy_ips', 0)} "
-        f"length_filtered={summary.get('length_filtered', 0)} body_success_rate={summary.get('body_success_rate', 0)}"
+        f"length_filtered={summary.get('length_filtered', 0)} body_success_rate={summary.get('body_success_rate', 0)} "
+        f"analysis_selected={summary.get('analysis_selected', 0)} "
+        f"quality_dropped={summary.get('quality_dropped', 0)} "
+        f"sampling_excluded={summary.get('sampling_excluded', 0)} "
+        f"detail_skipped_list_complete={summary.get('detail_skipped_list_complete', 0)}"
     )

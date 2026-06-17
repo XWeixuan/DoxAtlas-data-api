@@ -22,7 +22,7 @@ from .guba_utils.ProxyManager import ProxyManager
 from .guba_utils.SmartBatchCrawler import GlobalScheduler
 from cn_hk_collector.collectors.chinese_text import clean_chinese_text, decode_chinese_response
 from cn_hk_collector.collectors.crawl_log import format_social_crawl_summary
-from cn_hk_collector.content_filters import apply_length_relevance_filter
+from cn_hk_collector.social_quality import annotate_social_records
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +43,7 @@ DETAIL_DEADLINE_SECONDS = 360
 DETAIL_MAX_ATTEMPTS_PER_URL = 1
 DETAIL_DIRECT_DEADLINE_SECONDS = 60
 DETAIL_DIRECT_WORKERS = 32
-DETAIL_DIRECT_LIMIT = int(os.environ.get("GUBA_DETAIL_DIRECT_LIMIT", "500"))
-DEFAULT_MAX_LIST_PAGES = 600
+DEFAULT_MAX_LIST_PAGES = 3000
 DIRECT_PROXY_MODES = {"direct", "none", "off"}
 
 
@@ -110,7 +109,7 @@ def _is_guba_block_page(html: str) -> bool:
         "em_capt",
         "validate.js",
         "身份核实",
-        "韬唤鏍稿疄",
+        "东方财富证券",
     )
     return any(marker in html for marker in markers)
 
@@ -201,6 +200,13 @@ def _parse_mguba_api_publish_time(value: str) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _safe_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _build_mguba_api_code(ticker: str, market: str = "cn") -> str:
     return f"hk{ticker.zfill(5)}" if market == "hk" else ticker
 
@@ -238,14 +244,20 @@ def _parse_mguba_api_list_items(payload: dict, ticker: str, market: str = "cn") 
                 "published_at": published_dt.isoformat(),
                 "published_dt": published_dt,
                 "summary": content_text or None,
+                "social_read_count": _safe_int(row.get("post_click_count")),
+                "social_comment_count": _safe_int(row.get("post_comment_count")),
+                "social_like_count": _safe_int(row.get("post_like_count")),
+                "social_forward_count": _safe_int(row.get("post_forward_count")),
+                "social_has_image": bool(row.get("post_has_pic") or row.get("post_pic_url")),
+                "social_is_top": bool(row.get("post_top_status") or row.get("post_is_top")),
             }
         )
     return items
 
 
-def _fetch_mguba_api_list_page(ticker: str, page: int, market: str = "cn", proxy_manager=None) -> list[dict]:
+def _fetch_mguba_api_list_page_result(ticker: str, page: int, market: str = "cn", proxy_manager=None) -> tuple[list[dict], bool]:
     if not proxy_manager:
-        return []
+        return [], False
     code = _build_mguba_api_code(ticker, market)
     page_size = _guba_list_page_size()
     data = {
@@ -306,8 +318,8 @@ def _fetch_mguba_api_list_page(ticker: str, page: int, market: str = "cn", proxy
             continue
         if payload.get("rc") != 1:
             logger.debug("mguba API list returned rc=%s ticker=%s market=%s page=%s", payload.get("rc"), ticker, market, page)
-            return []
-        return _parse_mguba_api_list_items(payload, ticker, market)
+            return [], False
+        return _parse_mguba_api_list_items(payload, ticker, market), True
 
     logger.debug(
         "mguba API list exhausted retries ticker=%s market=%s page=%s attempts=%s last_error=%s",
@@ -317,7 +329,12 @@ def _fetch_mguba_api_list_page(ticker: str, page: int, market: str = "cn", proxy
         max_attempts,
         last_error,
     )
-    return []
+    return [], False
+
+
+def _fetch_mguba_api_list_page(ticker: str, page: int, market: str = "cn", proxy_manager=None) -> list[dict]:
+    items, _ = _fetch_mguba_api_list_page_result(ticker, page, market, proxy_manager)
+    return items
 
 
 def _fetch_mguba_list_page(ticker: str, market: str = "cn", proxy_manager=None) -> list[dict]:
@@ -337,14 +354,23 @@ def _fetch_mguba_list_page(ticker: str, market: str = "cn", proxy_manager=None) 
     return _parse_mguba_list_html(html)
 
 
-def fetch_guba_list_page(ticker: str, page: int, proxy_manager=None, market: str = "cn") -> (list, bool):
+def fetch_guba_list_page(
+    ticker: str,
+    page: int,
+    proxy_manager=None,
+    market: str = "cn",
+    *,
+    allow_html_fallback: bool = True,
+) -> (list, bool):
     """
     Fetch a single list page and return its parsed items.
     Returns (items, should_continue)
     """
-    api_items = _fetch_mguba_api_list_page(ticker, page, market, proxy_manager)
-    if api_items:
+    api_items, api_success = _fetch_mguba_api_list_page_result(ticker, page, market, proxy_manager)
+    if api_success:
         return api_items, True
+    if not allow_html_fallback:
+        return [], False
 
     url = _build_guba_list_url(ticker, page, market)
     retry_count = 1
@@ -592,7 +618,7 @@ def _fetch_guba_detail_proxy_worker(url: str, proxy_manager: ProxyManager) -> di
 
 
 def _fetch_guba_details_direct_pool(urls: list[str], candidate_count: int | None = None) -> dict:
-    selected_urls = urls[:DETAIL_DIRECT_LIMIT]
+    selected_urls = list(dict.fromkeys(urls))
     results: dict[str, dict] = {}
     if not selected_urls:
         return {"data": results, "total_urls": 0, "success_count": 0, "missing_count": 0, "duration_seconds": 0.0, "total_ips_used": 0, "timed_out": False}
@@ -623,13 +649,13 @@ def _fetch_guba_details_direct_pool(urls: list[str], candidate_count: int | None
         "duration_seconds": round(time.perf_counter() - started, 2),
         "total_ips_used": int(getattr(proxy_manager, "ips_fetched", 0) or 0),
         "timed_out": timed_out,
-        "detail_capped": len(selected_urls) < (candidate_count or len(urls)),
+        "detail_capped": False,
         "candidate_urls": candidate_count or len(urls),
     }
 
 
 def _fetch_guba_details_proxy(urls: list[str]) -> dict:
-    selected_urls = urls[:DETAIL_DIRECT_LIMIT]
+    selected_urls = list(dict.fromkeys(urls))
     if not selected_urls:
         return {"data": {}, "total_urls": 0, "success_count": 0, "missing_count": 0, "duration_seconds": 0.0, "total_ips_used": 0, "timed_out": False}
 
@@ -643,7 +669,7 @@ def _fetch_guba_details_proxy(urls: list[str]) -> dict:
         deadline_seconds=DETAIL_DEADLINE_SECONDS,
     )
     report = scheduler.run()
-    report["detail_capped"] = len(selected_urls) < len(urls)
+    report["detail_capped"] = False
     report["candidate_urls"] = len(urls)
     return report
 
@@ -689,14 +715,22 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
         cached = page_cache.get(page_no)
         if cached is not None:
             return cached
-        result = fetch_guba_list_page(ticker, page_no, proxy_manager, market=market)
+        result = fetch_guba_list_page(
+            ticker,
+            page_no,
+            proxy_manager,
+            market=market,
+            allow_html_fallback=not has_custom_window,
+        )
         page_cache[page_no] = result
         return result
 
     def find_custom_window_start_page() -> int:
         if not has_custom_window:
             return 1
-        first_items, _ = get_list_page(1)
+        first_items, first_success = get_list_page(1)
+        if not first_success:
+            raise RuntimeError("guba_list_page_failed:page=1")
         if not first_items:
             return 1
         dated_items, oldest_dt, _ = _guba_page_bounds(first_items, now_utc)
@@ -706,7 +740,9 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
         low = 1
         high = 2
         while high <= max_list_pages:
-            items, _ = get_list_page(high)
+            items, success = get_list_page(high)
+            if not success:
+                raise RuntimeError(f"guba_list_page_failed:page={high}")
             if not items:
                 return high
             dated_items, oldest_dt, _ = _guba_page_bounds(items, now_utc)
@@ -715,13 +751,25 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
             low = high
             high *= 2
 
+        if high > max_list_pages:
+            items, success = get_list_page(max_list_pages)
+            if not success:
+                raise RuntimeError(f"guba_list_page_failed:page={max_list_pages}")
+            dated_items, oldest_dt, _ = _guba_page_bounds(items, now_utc) if items else ([], now_utc, now_utc)
+            if dated_items and oldest_dt >= custom_end:
+                raise RuntimeError(
+                    f"guba_list_incomplete:max_pages_before_window_end page={max_list_pages} window_end={custom_end.isoformat()}"
+                )
+
         high = min(high, max_list_pages)
         result = high
         left = low + 1
         right = high
         while left <= right:
             mid = (left + right) // 2
-            items, _ = get_list_page(mid)
+            items, success = get_list_page(mid)
+            if not success:
+                raise RuntimeError(f"guba_list_page_failed:page={mid}")
             if not items:
                 result = mid
                 right = mid - 1
@@ -741,9 +789,15 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
     # --- Step 1: Fetch list pages ---
     while True:
         if page > max_list_pages:
+            if has_custom_window:
+                raise RuntimeError(
+                    f"guba_list_incomplete:max_pages_before_window_start page={max_list_pages} window_start={start_utc.isoformat()}"
+                )
             break
         items, success = get_list_page(page)
         if not items:
+            if not success:
+                raise RuntimeError(f"guba_list_page_failed:page={page}")
             break
         last_scanned_page = page
             
@@ -801,6 +855,10 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
             "detail_success_rate": 0,
             "timed_out": False,
             "length_filtered": 0,
+            "quality_dropped": 0,
+            "analysis_selected": 0,
+            "sampling_excluded": 0,
+            "detail_skipped_list_complete": 0,
             "list_start_page": first_scanned_page,
             "list_last_page": last_scanned_page,
             "list_pages_scanned": pages_scanned,
@@ -810,9 +868,48 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
         logger.info(format_social_crawl_summary(summary))
         return []
         
-    # --- Step 2: Concurrently fetch full text through the configured proxy pool ---
-    urls_to_fetch = list(dict.fromkeys(it["url"] for it in all_items))
-    logger.debug("Dispatching %s Guba URLs to proxy-only detail workers...", len(urls_to_fetch))
+    # --- Step 2: Clean/sample from list text, then fetch detail only when needed. ---
+    pre_records = []
+    for it in all_items:
+        list_summary = (it.get("summary") or "").strip()
+        pre_records.append({
+            "ticker": ticker,
+            "published_at": it["published_at"],
+            "source_type": "social",
+            "channel": "guba",
+            "source_name": it["source_name"],
+            "title": it["title"],
+            "summary": list_summary or None,
+            "content": list_summary or it["title"],
+            "url": it["url"],
+            "social_read_count": _safe_int(it.get("social_read_count")),
+            "social_comment_count": _safe_int(it.get("social_comment_count")),
+            "social_like_count": _safe_int(it.get("social_like_count")),
+            "social_forward_count": _safe_int(it.get("social_forward_count")),
+            "social_has_image": bool(it.get("social_has_image")),
+            "social_is_top": bool(it.get("social_is_top")),
+        })
+
+    quota_window_start = custom_start if has_custom_window else start_utc
+    quota_window_end = custom_end if has_custom_window else now_utc
+    pre_records = annotate_social_records(
+        pre_records,
+        window_start=quota_window_start,
+        window_end=quota_window_end,
+    )
+
+    urls_to_fetch = list(
+        dict.fromkeys(
+            record["url"]
+            for record in pre_records
+            if record.get("social_selected_for_analysis") and record.get("social_detail_required")
+        )
+    )
+    logger.debug(
+        "Dispatching %s/%s selected Guba URLs to proxy-only detail workers...",
+        len(urls_to_fetch),
+        sum(1 for record in pre_records if record.get("social_selected_for_analysis")),
+    )
     
     detail_started = time.perf_counter()
     results_report = _fetch_guba_details_proxy(urls_to_fetch)
@@ -821,9 +918,8 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
     
     # --- Step 3: Merge ---
     final_records = []
-    body_success = 0
-    for it in all_items:
-        content_dict = content_map.get(it["url"])
+    for item in pre_records:
+        content_dict = content_map.get(item["url"])
         full_text = ""
         if content_dict and "full_text" in content_dict:
             full_text = content_dict["full_text"] or ""
@@ -831,28 +927,41 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
             full_text = content_dict["text"] or ""
 
         full_text = full_text.strip()
-        list_summary = (it.get("summary") or "").strip()
-        content = full_text or list_summary or it["title"]
-        if _has_body_text(content, it["title"], source_summary=list_summary):
-            body_success += 1
-            
-        final_records.append({
-            "ticker": ticker,
-            "published_at": it["published_at"],
-            "source_type": "social",
-            "channel": "guba",
-            "source_name": it["source_name"],
-            "title": it["title"],
-            "summary": list_summary or None,
-            "content": content,
-            "url": it["url"],
-        })
-        
-    final_records = apply_length_relevance_filter(final_records, source_type="social")
-    detail_success = int(results_report.get("success_count") or body_success)
+        list_summary = (item.get("summary") or "").strip()
+        content = full_text or (item.get("content") or "").strip() or list_summary or item["title"]
+        merged = dict(item)
+        merged["content"] = content
+        if full_text:
+            merged["social_body_quality"] = "detail_full_text"
+        final_records.append(merged)
+
+    final_records = annotate_social_records(
+        final_records,
+        window_start=quota_window_start,
+        window_end=quota_window_end,
+        preserve_existing_selection=True,
+    )
+    analysis_records = [record for record in final_records if record.get("social_selected_for_analysis")]
+    body_success = sum(
+        1
+        for record in analysis_records
+        if _has_body_text(record.get("content") or "", record.get("title") or "", source_summary=record.get("summary") or "")
+    )
+    detail_success = int(results_report.get("success_count") or 0)
     detail_selected = int(results_report.get("total_urls") or len(urls_to_fetch))
     detail_failed = max(detail_selected - detail_success, 0)
     detail_total = detail_success + detail_failed
+    quality_dropped = sum(1 for record in final_records if record.get("social_quality_tier") == "drop")
+    sampling_excluded = sum(
+        1
+        for record in final_records
+        if record.get("social_quality_tier") != "drop" and not record.get("social_selected_for_analysis")
+    )
+    detail_skipped_list_complete = sum(
+        1
+        for record in final_records
+        if record.get("social_selected_for_analysis") and not record.get("social_detail_required")
+    )
     summary = {
         "ticker": ticker,
         "channel": "guba",
@@ -869,9 +978,13 @@ def fetch_guba_posts_sync(ticker: str, lookback_days: int = 7, window_start=None
         "detail_failed": detail_failed,
         "detail_success_rate": round(detail_success / detail_total, 4) if detail_total else 0,
         "body_success": body_success,
-        "body_success_rate": round(body_success / len(final_records), 4) if final_records else 0,
+        "body_success_rate": round(body_success / len(analysis_records), 4) if analysis_records else 0,
         "timed_out": bool(results_report.get("timed_out")),
-        "length_filtered": sum(1 for record in final_records if record.get("is_content_relevant") is False),
+        "length_filtered": quality_dropped,
+        "quality_dropped": quality_dropped,
+        "analysis_selected": len(analysis_records),
+        "sampling_excluded": sampling_excluded,
+        "detail_skipped_list_complete": detail_skipped_list_complete,
         "list_start_page": first_scanned_page,
         "list_last_page": last_scanned_page,
         "list_pages_scanned": pages_scanned,

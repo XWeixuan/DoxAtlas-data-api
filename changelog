@@ -17,3 +17,6 @@
 2026-06-17
 - Improved CN/HK media body capture by expanding detail-fetch coverage, retrying transient detail proxy failures, parsing CLS Next.js article bodies, and using controlled company-name suffix aliases without changing relevance thresholds.
 - Added alias-aware yicai and Sina list-item evidence filtering so records with no target ticker/name evidence are dropped before detail fetch and relevance labeling.
+- Added Guba social quality annotations, list-stage detail-need detection, 3000-per-7-day stratified analysis selection, and full raw_social handoff fields while preserving all fetched social rows.
+- Raised the default Guba custom-window pagination ceiling to 3000 pages, made custom-window list page failures fail fast instead of looking like list exhaustion, and removed the legacy 500-row detail cap.
+- Added raw_social quality/sampling/engagement columns to local schema and DoxAtlas Supabase, with tests covering sampling, detail-skip behavior, schema fields, and pagination failure handling.

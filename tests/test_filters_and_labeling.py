@@ -183,6 +183,9 @@ class FilterAndLabelingTest(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS ticker_entities", schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS raw_media", schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS raw_social", schema)
+        self.assertIn("social_quality_score INTEGER", schema)
+        self.assertIn("social_selected_for_analysis BOOLEAN", schema)
+        self.assertIn("social_quality_reasons JSONB", schema)
 
     def test_collect_ticker_writes_labeled_media_records(self) -> None:
         captured: dict[str, list[dict]] = {}
@@ -216,6 +219,12 @@ class FilterAndLabelingTest(unittest.TestCase):
                 "url": "https://example.test/social/1",
                 "source_type": "social",
                 "channel": "guba",
+                "is_content_relevant": True,
+                "content_relevance_reason": "selected_for_analysis",
+                "social_quality_score": 42,
+                "social_quality_tier": "medium",
+                "social_quality_reasons": ["unit_test"],
+                "social_selected_for_analysis": True,
             }
         ]
 
@@ -238,6 +247,8 @@ class FilterAndLabelingTest(unittest.TestCase):
         self.assertEqual(captured["raw_media"][0]["content_relevance_reason"], "target_in_title_and_repeated")
         self.assertEqual(captured["raw_media"][1]["is_content_relevant"], False)
         self.assertEqual(captured["raw_media"][1]["content_relevance_reason"], "length_filter:content_chars>5000")
+        self.assertEqual(captured["raw_social"][0]["social_quality_tier"], "medium")
+        self.assertTrue(captured["raw_social"][0]["social_selected_for_analysis"])
 
     def test_pull_api_returns_cleaned_raw_fields(self) -> None:
         from doxatlas_data_api import app as api_app
@@ -271,7 +282,23 @@ class FilterAndLabelingTest(unittest.TestCase):
                     "content_relevance_reason": "length_filter:content_chars>5000",
                 }
             ],
-            "raw_social": [],
+            "raw_social": [
+                {
+                    "market": "cn",
+                    "ticker": "600519",
+                    "source_type": "social",
+                    "channel": "guba",
+                    "title": "social cleaned",
+                    "content": "social cleaned content",
+                    "url": "https://example.test/social/1",
+                    "is_content_relevant": True,
+                    "content_relevance_reason": "selected_for_analysis",
+                    "social_quality_score": 55,
+                    "social_quality_tier": "medium",
+                    "social_quality_reasons": ["unit_test"],
+                    "social_selected_for_analysis": True,
+                }
+            ],
         }
 
         with mock.patch.object(api_app, "connect", return_value=FakeConnection()), mock.patch.object(
@@ -281,6 +308,8 @@ class FilterAndLabelingTest(unittest.TestCase):
 
         self.assertEqual(response.raw_media[0]["is_content_relevant"], False)
         self.assertEqual(response.raw_media[0]["content_relevance_reason"], "length_filter:content_chars>5000")
+        self.assertEqual(response.raw_social[0]["social_quality_tier"], "medium")
+        self.assertTrue(response.raw_social[0]["social_selected_for_analysis"])
 
 
 if __name__ == "__main__":

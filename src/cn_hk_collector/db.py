@@ -46,6 +46,21 @@ RAW_SOCIAL_COLUMNS = (
     "origin_keyword_type",
     "is_content_relevant",
     "content_relevance_reason",
+    "social_quality_score",
+    "social_quality_tier",
+    "social_quality_reasons",
+    "social_body_quality",
+    "social_detail_required",
+    "social_selected_for_analysis",
+    "social_sampling_bucket",
+    "social_sampling_reason",
+    "social_content_chars",
+    "social_read_count",
+    "social_comment_count",
+    "social_like_count",
+    "social_forward_count",
+    "social_has_image",
+    "social_is_top",
 )
 
 RAW_TABLE_COLUMNS = {
@@ -83,10 +98,10 @@ def init_schema(conn: psycopg.Connection) -> None:
 def _coerce_value(column: str, value: Any) -> Any:
     if column == "duplicate_count":
         return int(value or 1)
-    if column == "duplicate_urls":
+    if column in {"duplicate_urls", "social_quality_reasons"}:
         if isinstance(value, (list, dict)):
             return Jsonb(value)
-        return Jsonb([])
+        return Jsonb([] if column == "duplicate_urls" else [])
     if column == "origin_keyword_type":
         return value or "Base"
     if column == "source_type":

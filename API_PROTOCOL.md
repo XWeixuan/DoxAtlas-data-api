@@ -133,7 +133,18 @@ Response:
       "channel": "guba",
       "title": "...",
       "content": "...",
-      "url": "https://..."
+      "url": "https://...",
+      "is_content_relevant": true,
+      "content_relevance_reason": "selected_for_analysis",
+      "social_quality_score": 72,
+      "social_quality_tier": "high",
+      "social_quality_reasons": ["event_or_fundamental_signal", "reasoning_signal"],
+      "social_body_quality": "detail_full_text",
+      "social_detail_required": true,
+      "social_selected_for_analysis": true,
+      "social_sampling_bucket": "2026-06-13",
+      "social_sampling_reason": "selected:stratified_quota_3000",
+      "social_content_chars": 180
     }
   ]
 }
@@ -151,7 +162,7 @@ Errors:
 1. `POST /v1/crawl-tasks`
 2. Poll `GET /v1/crawl-tasks/{task_id}` until `succeeded` or `failed`.
 3. If `succeeded`, call `POST /v1/crawl-tasks/{task_id}/pull` exactly once.
-4. Insert returned `raw_media` and `raw_social` into the DoxAtlas Supabase-backed raw tables.
+4. Insert returned `raw_media` and `raw_social` into the DoxAtlas Supabase-backed raw tables. For social rows, the API returns full raw rows plus quality/sampling fields; DoxAtlas should feed only rows where `is_content_relevant=true` or `social_selected_for_analysis=true` into the analysis pipeline.
 5. If create/status/pull fails or times out, use the local DoxAtlas crawler fallback.
 
 ## Hong Kong Backend Environment Variables

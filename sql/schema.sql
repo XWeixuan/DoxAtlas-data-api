@@ -74,6 +74,21 @@ CREATE TABLE IF NOT EXISTS raw_social (
   origin_keyword_type TEXT DEFAULT 'Base',
   is_content_relevant BOOLEAN,
   content_relevance_reason TEXT,
+  social_quality_score INTEGER,
+  social_quality_tier TEXT,
+  social_quality_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+  social_body_quality TEXT,
+  social_detail_required BOOLEAN,
+  social_selected_for_analysis BOOLEAN,
+  social_sampling_bucket TEXT,
+  social_sampling_reason TEXT,
+  social_content_chars INTEGER,
+  social_read_count INTEGER,
+  social_comment_count INTEGER,
+  social_like_count INTEGER,
+  social_forward_count INTEGER,
+  social_has_image BOOLEAN,
+  social_is_top BOOLEAN,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (market, ticker, url)
@@ -85,6 +100,14 @@ CREATE INDEX IF NOT EXISTS idx_raw_social_market_ticker_published_at
 CREATE INDEX IF NOT EXISTS idx_raw_social_market_ticker_content_relevance
   ON raw_social(market, ticker, is_content_relevant)
   WHERE is_content_relevant IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_raw_social_market_ticker_selected
+  ON raw_social(market, ticker, social_selected_for_analysis)
+  WHERE social_selected_for_analysis IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_raw_social_market_ticker_quality
+  ON raw_social(market, ticker, social_quality_tier)
+  WHERE social_quality_tier IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS crawler_tasks (
   task_id TEXT PRIMARY KEY,
